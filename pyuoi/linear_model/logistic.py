@@ -22,6 +22,7 @@ class UoI_L1Logistic(AbstractUoILinearClassifier):
             copy_X=copy_X,
             fit_intercept=fit_intercept,
             normalize=normalize,
+            random_state=random_state,
             comm=comm
         )
         self.n_C = n_C
@@ -36,7 +37,7 @@ class UoI_L1Logistic(AbstractUoILinearClassifier):
         # sklearn cannot do LogisticRegression without penalization, due to the ill-posed nature
         # of the problem. We may want to set C=np.inf for no penalization, but
         # we risk no convergence.
-        self.__estimation_lm = LogisticRegression(random_state=random_state)
+        self.__estimation_lm = LogisticRegression(solver='saga', random_state=random_state)
 
     @property
     def estimation_lm(self):
