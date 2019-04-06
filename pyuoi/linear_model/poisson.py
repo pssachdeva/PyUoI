@@ -16,9 +16,9 @@ class UoI_Poisson(AbstractUoILinearRegressor):
 
     def __init__(self, n_lambdas=48, alphas=np.array([0.5]),
                  n_boots_sel=48, n_boots_est=48, selection_frac=0.9,
-                 estimation_frac=0.9, stability_selection=1.,
+                 estimation_frac=0.9, stability_selection=1., lambdas=None,
                  estimation_score='log', warm_start=True, eps=1e-3,
-                 tol=1e-5, copy_X=True, fit_intercept=True,
+                 tol=1e-5, solver='cd', copy_X=True, fit_intercept=True,
                  normalize=True, random_state=None, max_iter=1000,
                  comm=None):
         super(UoI_Poisson, self).__init__(
@@ -38,22 +38,44 @@ class UoI_Poisson(AbstractUoILinearRegressor):
         self.n_alphas = len(alphas)
         self.warm_start = warm_start
         self.eps = eps
-        self.lambdas = None
-        self.__selection_lm = Poisson(
-            fit_intercept=fit_intercept,
-            normalize=normalize,
-            max_iter=max_iter,
-            tol=tol,
-            warm_start=warm_start)
-        # estimation is a Poisson regression with no regularization
-        self.__estimation_lm = Poisson(
-            alpha=0,
-            l1_ratio=0,
-            fit_intercept=fit_intercept,
-            normalize=normalize,
-            max_iter=max_iter,
-            tol=tol,
-            warm_start=False)
+        self.lambdas = lambdas
+        self.solver = solver
+        if self.solver == 'cd':
+            self.__selection_lm = Poisson(
+                fit_intercept=fit_intercept,
+                normalize=normalize,
+                max_iter=max_iter,
+                tol=tol,
+                warm_start=warm_start)
+            # estimation is a Poisson regression with no regularization
+            self.__estimation_lm = Poisson(
+                alpha=0,
+                l1_ratio=0,
+                fit_intercept=fit_intercept,
+                normalize=normalize,
+                max_iter=max_iter,
+                tol=tol,
+                warm_start=False)
+        elif self.solver == 'proximal_grad':
+            self.alphas = np.array([1])
+            self.__selection_lm = DaskPoisson(
+                alpha=1,
+                penalty='l1',
+                solver=solver,
+                tol=tol,
+                max_iter=max_iter,
+                fit_intercept=fit_intercept
+            )
+            self.__estimation_lm = DaskPoisson(
+                alpha=10,
+                penalty='l2',
+                solver=solver,
+                tol=tol,
+                max_iter=max_iter,
+                fit_intercept=fit_intercept
+            )
+        else:
+            raise ValueError('Solver does not exist.')
 
     @property
     def estimation_lm(self):
@@ -66,7 +88,7 @@ class UoI_Poisson(AbstractUoILinearRegressor):
     def preprocess_data(self, X, y):
         # ensure that we fit the intercept by hand, but normalize if desired
         return _preprocess_data(
-            X, y, fit_intercept=False, normalize=self.normalize,
+            X, y, fit_intercept=self.fit_intercept, normalize=self.normalize,
             copy=self.copy_X
         )
 
@@ -96,10 +118,10 @@ class UoI_Poisson(AbstractUoILinearRegressor):
         X, y = check_X_y(X, y, accept_sparse=['csr', 'csc', 'coo'],
                          y_numeric=True, multi_output=True)
         # preprocess data
-        X, y, X_offset, y_offset, X_scale = self.preprocess_data(X, y)
+        X, _, X_offset, _, X_scale = self.preprocess_data(X, y)
         super(AbstractUoILinearRegressor, self).fit(X, y, stratify=stratify,
                                                     verbose=verbose)
-        self.coef_ = self.coef_.squeeze()
+        self.coef_ = self.coef_.squeeze() / X_scale
         self._fit_intercept(X, y)
         return self
 
@@ -511,6 +533,37 @@ class Poisson(LinearModel):
         This is used in cases where the model has no support selected.
         """
         return PoissonInterceptFitterNoFeatures(y)
+
+class DaskPoisson(LinearModel):
+    def __init__(
+        self, alpha=1., penalty='l1', solver='proximal_grad', tol=1e-4,
+        max_iter=100, fit_intercept=True, random_state=None, l1_ratio=None
+    ):
+        from dask_ml.linear_model import PoissonRegression
+        self.alpha = alpha
+        self.l1_ratio = 1.
+        self.penalty = penalty
+        self.solver = solver
+        self.tol = tol
+        self.max_iter = max_iter
+        self.fit_intercept = fit_intercept
+        self.random_state = random_state
+
+        self.poisson = PoissonRegression(
+            C=1. / alpha, penalty=penalty, solver=solver, tol=tol,
+            max_iter=max_iter, fit_intercept=fit_intercept,
+            random_state=random_state
+        )
+
+    def fit(self, X, y):
+        self.poisson.set_params(C=1. / self.alpha, penalty=self.penalty)
+        self.poisson.fit(X, y)
+        self.coef_ = self.poisson.coef_
+        self.intercept_ = self.poisson.intercept_
+
+    def predict_mean(self, X):
+        return self.poisson.predict(X)
+
 
 class PoissonInterceptFitterNoFeatures(object):
     def __init__(self, y):
