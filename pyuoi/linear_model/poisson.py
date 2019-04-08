@@ -7,6 +7,7 @@ from pyuoi import utils
 from sklearn.exceptions import NotFittedError
 from sklearn.linear_model.base import LinearModel
 from sklearn.linear_model.base import _preprocess_data
+from sklearn.preprocessing import StandardScaler
 from sklearn.utils import check_X_y
 
 class UoI_Poisson(AbstractUoILinearRegressor):
@@ -40,6 +41,9 @@ class UoI_Poisson(AbstractUoILinearRegressor):
         self.eps = eps
         self.lambdas = lambdas
         self.solver = solver
+        if normalize:
+            self.scaler = StandardScaler()
+
         if self.solver == 'cd':
             self.__selection_lm = Poisson(
                 fit_intercept=fit_intercept,
@@ -118,7 +122,13 @@ class UoI_Poisson(AbstractUoILinearRegressor):
         X, y = check_X_y(X, y, accept_sparse=['csr', 'csc', 'coo'],
                          y_numeric=True, multi_output=True)
         # preprocess data
-        X, _, X_offset, _, X_scale = self.preprocess_data(X, y)
+        #X, _, X_offset, _, X_scale = self.preprocess_data(X, y)
+        if self.normalize:
+            X = self.scaler.fit_transform(X)
+            X_scale = self.scaler.scale_
+        else:
+            X_scale = 1
+
         super(AbstractUoILinearRegressor, self).fit(X, y, stratify=stratify,
                                                     verbose=verbose)
         self.coef_ = self.coef_.squeeze() / X_scale
@@ -245,6 +255,52 @@ class UoI_Poisson(AbstractUoILinearRegressor):
         else:
             self.intercept_ = np.zeros(1)
 
+    def _fit_intercept_no_features(self, y):
+        """"Fit a model with only an intercept.
+
+        This is used in cases where the model has no support selected.
+        """
+        return PoissonInterceptFitterNoFeatures(y)
+
+    def predict(self, X):
+        """Predicts the response variable given a design matrix. The output is
+        the mode of the Poisson distribution.
+
+        Parameters
+        ----------
+        X : array_like, shape (n_samples, n_features)
+            Design matrix to predict on.
+
+        Returns
+        -------
+        mode : array_like, shape (n_samples)
+            The predicted response values, i.e. the modes.
+        """
+        if hasattr(self, 'coef_') and hasattr(self, 'intercept_'):
+            mu = np.exp(self.intercept_ + np.dot(X, self.coef_))
+            mode = np.floor(mu)
+            return mode
+        else:
+            raise NotFittedError('Poisson model is not fit.')
+
+    def predict_mean(self, X):
+        """Calculates the mean response variable given a design matrix.
+
+        Parameters
+        ----------
+        X : array_like, shape (n_samples, n_features)
+            Design matrix to predict on.
+
+        Returns
+        -------
+        mu : array_like, shape (n_samples)
+            The predicted response values, i.e. the conditional means.
+        """
+        if hasattr(self, 'coef_') and hasattr(self, 'intercept_'):
+            mu = np.exp(self.intercept_ + np.dot(X, self.coef_))
+            return mu
+        else:
+            raise NotFittedError('Poisson model is not fit.')
 
 class Poisson(LinearModel):
     def __init__(self, alpha=1.0, l1_ratio=0.5, fit_intercept=True,
@@ -564,11 +620,17 @@ class DaskPoisson(LinearModel):
     def predict_mean(self, X):
         return self.poisson.predict(X)
 
+    def _fit_intercept_no_features(self, y):
+        """"Fit a model with only an intercept.
+
+        This is used in cases where the model has no support selected.
+        """
+        return PoissonInterceptFitterNoFeatures(y)
+
 
 class PoissonInterceptFitterNoFeatures(object):
     def __init__(self, y):
         self.intercept_ = np.log(y.mean())
-        raise NotImplementedError
 
     def predict(self, X):
         """Predicts the response variable given a design matrix. The output is
